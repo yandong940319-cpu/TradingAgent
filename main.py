@@ -29,6 +29,7 @@ from layers.intelligence.debate import BullAgent, BearAgent, RiskAgent, DebateCo
 from layers.intelligence.adversarial_reflection import AdversarialAgent, ReflectionAgent
 from layers.intelligence.risk_management import RiskManagementAgent
 from layers.intelligence.portfolio_manager import PortfolioManagerAgent
+from layers.intelligence.market_intelligence import MarketIntelligenceAgent
 
 # Layer 3 - Governance
 from layers.governance.cio import CIOAgent
@@ -82,6 +83,7 @@ class AIQuantFundOS:
         """注册所有 Agent 到编排引擎"""
 
         # Layer 2 — Intelligence
+        self.engine.register_agent(MarketIntelligenceAgent())
         self.engine.register_agent(RegimeDetectionAgent())
         self.engine.register_agent(BullAgent())
         self.engine.register_agent(BearAgent())

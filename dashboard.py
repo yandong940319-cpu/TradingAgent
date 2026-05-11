@@ -98,6 +98,30 @@ async def run_full_pipeline(symbol: str, tf: str = "1h") -> dict:
                 summary_parts.append(f"O={k.get('open',0)} H={k.get('high',0)} L={k.get('low',0)} C={k.get('close',0)} V={k.get('volume',0)}")
     market_summary = "\n".join(summary_parts)
 
+    # Layer 1.5: Market Intelligence — 免费数据源情绪分析
+    from core.market_data_sources import collect_market_sentiment
+    sentiment = collect_market_sentiment(symbol)
+    mi_status = "done" if sentiment.get("news_headlines") else "limited"
+    results["agents"].append({
+        "layer": "Layer 1.5", "name": "Market Intelligence",
+        "status": mi_status,
+        "output": {
+            "fear_greed": sentiment["fear_greed"],
+            "sentiment_score": sentiment["sentiment_score"],
+            "news_count": sentiment["news_count"],
+            "headlines": [h["title"] for h in sentiment.get("news_headlines", [])[:3]],
+        },
+    })
+
+    # 扩展市场摘要，加入情绪数据供 AI 分析
+    fng = sentiment["fear_greed"]
+    sentiment_line = f"\n市场情绪: Fear & Greed={fng.get('value','?')}/100 ({fng.get('classification','?')})"
+    market_summary += sentiment_line
+    if sentiment.get("news_headlines"):
+        top_news = sentiment["news_headlines"][:2]
+        news_lines = "\n".join([f"  • {h['source']}: {h['title']}" for h in top_news])
+        market_summary += f"\n最新新闻:\n{news_lines}"
+
     # Layer 2: Intelligence — DeepSeek AI 分析
     # Regime
     regime = await asyncio.to_thread(ai.analyze_regime, market_summary)
