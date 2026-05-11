@@ -37,6 +37,7 @@ class BacktestEngine:
         position = 0.0  # 0~1 仓位比例
         trade_log = []
         equity = [{"time": klines[0]["date" if "date" in klines[0] else "time"], "equity": capital}]
+        self._symbol = symbol
 
         for i in range(len(klines)):
             k = klines[i]
@@ -168,30 +169,24 @@ class BacktestEngine:
         return []
 
     async def _simulate_pipeline(self, kline: dict) -> str:
-        """模拟 Agent 流水线，返回信号"""
-        price = float(kline.get("close", kline.get(4, 0)))
-        vol = float(kline.get("volume", kline.get(5, 0)))
-        high = float(kline.get("high", kline.get(2, price)))
-        low = float(kline.get("low", kline.get(3, price)))
+        """调用真实 DeepSeek Agent 分析单根 K 线，返回信号"""
+        from core.deepseek_client import DeepSeekClient
 
-        # Regime Detection
-        range_size = (high - low) / price if price > 0 else 0
-        regime = "TRENDING" if range_size > 0.02 else "RANGING"
+        price  = float(kline.get("close", kline.get(4, 0)))
+        high   = float(kline.get("high",  kline.get(2, price)))
+        low    = float(kline.get("low",   kline.get(3, price)))
+        volume = float(kline.get("volume",kline.get(5, 0)))
+        time   = kline.get("date", kline.get("time", ""))
 
-        # Bull/Bear simplified
-        bull_score = min(0.85, 0.4 + range_size * 10 + (price % 100) / 500)
-        bear_score = min(0.7, 0.3 + (1 - range_size) * 5 + ((price * 7) % 100) / 500)
-        risk_score = min(0.6, 0.2 + vol / 100000)
+        summary = (
+            f"time={time} O={price} H={high} "
+            f"L={low} C={price} V={volume:.0f}"
+        )
 
-        # CIO Decision
-        net = bull_score - bear_score
-        if risk_score > 0.7:
-            return "NO_TRADE"
-        if net > 0.15:
-            return "LONG"
-        elif net < -0.15:
-            return "SHORT"
-        return "NO_TRADE"
+        ai = DeepSeekClient()
+        result = await asyncio.to_thread(ai.scan_signal, self._symbol, summary)
+        signal = result.get("signal", "NO_TRADE")
+        return signal
 
     def _calculate_metrics(self, final: float, initial: float,
                            trades: list, equity: list) -> dict:
