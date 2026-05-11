@@ -43,8 +43,9 @@ class BacktestEngine:
             k = klines[i]
             price = float(k.get("close", k.get(4, 0)))
 
-            # 每根 K 线运行分析流水线
-            signal = await self._simulate_pipeline(k)
+            # 每根 K 线运行分析流水线（传最近 30 根做上下文）
+            start_idx = max(0, i - 29)
+            signal = await self._simulate_pipeline(klines[start_idx:i + 1])
 
             # 根据信号调整仓位
             if signal == "LONG" and position < 0.5:
@@ -168,25 +169,26 @@ class BacktestEngine:
             print(f"[Backtest] Fetch error: {e}")
         return []
 
-    async def _simulate_pipeline(self, kline: dict) -> str:
-        """调用真实 DeepSeek Agent 分析单根 K 线，返回信号"""
+    async def _simulate_pipeline(self, klines_window: list) -> str:
+        """调用 DeepSeek Agent，基于最近 N 根 K 线返回信号"""
         from core.deepseek_client import DeepSeekClient
 
-        price  = float(kline.get("close", kline.get(4, 0)))
-        high   = float(kline.get("high",  kline.get(2, price)))
-        low    = float(kline.get("low",   kline.get(3, price)))
-        volume = float(kline.get("volume",kline.get(5, 0)))
-        time   = kline.get("date", kline.get("time", ""))
-
-        summary = (
-            f"time={time} O={price} H={high} "
-            f"L={low} C={price} V={volume:.0f}"
-        )
+        # 构建多 K 线摘要（最近 5 根）
+        recent = klines_window[-5:]
+        lines = []
+        for k in recent:
+            o = float(k.get("open", k.get(1, 0)))
+            h = float(k.get("high", k.get(2, 0)))
+            l = float(k.get("low", k.get(3, 0)))
+            c = float(k.get("close", k.get(4, 0)))
+            v = float(k.get("volume", k.get(5, 0)))
+            t = k.get("date", k.get("time", ""))
+            lines.append(f"time={t} O={o:.2f} H={h:.2f} L={l:.2f} C={c:.2f} V={v:.0f}")
+        summary = "\n".join(lines)
 
         ai = DeepSeekClient()
         result = await asyncio.to_thread(ai.scan_signal, self._symbol, summary)
-        signal = result.get("signal", "NO_TRADE")
-        return signal
+        return result.get("signal", "NO_TRADE")
 
     def _calculate_metrics(self, final: float, initial: float,
                            trades: list, equity: list) -> dict:
