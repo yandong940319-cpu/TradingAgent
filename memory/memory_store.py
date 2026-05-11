@@ -68,6 +68,10 @@ class MemoryStore:
                 CREATE INDEX IF NOT EXISTS idx_regimes_type ON regimes(regime_type);
             """)
 
+    def _get_conn(self):
+        """返回一个新的数据库连接（用作上下文管理器）"""
+        return sqlite3.connect(str(self.db_path))
+
     # ── Episodic Memory ──
 
     def save_episode(self, symbol: str, timeframe: str, event_type: str,

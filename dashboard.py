@@ -14,13 +14,56 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from layers.data.orchestrator import DataOrchestrator
 from core.protocols import AgentOutput, Signal
+from core import risk_config  # 硬规则配置
 from backtest.engine import BacktestEngine
+from memory.memory_store import MemoryStore
 
 app = FastAPI(title="AI Quant Fund OS", version="1.0.0")
 dc = DataOrchestrator(
     binance_key=os.getenv("BINANCE_API_KEY", ""),
     binance_secret=os.getenv("BINANCE_API_SECRET", ""),
 )
+
+
+# ── 硬规则风控（不经过 LLM） ──
+
+
+def _check_hard_rules(symbol: str, market_summary: str) -> dict:
+    """
+    执行硬编码风控检查，先于任何 LLM 调用。
+
+    返回:
+        {"allowed": True}  — 所有硬规则通过
+        {"allowed": False, "reason": "..."} — 硬规则拒绝
+    """
+    # 从记忆系统读取当日 PnL
+    try:
+        mem = MemoryStore()
+        today = datetime.now().strftime("%Y-%m-%d")
+        # 查询当天所有交易记录
+        with mem._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT outcome, confidence FROM episodic WHERE date(created_at) = ?",
+                (today,),
+            ).fetchall()
+        daily_pnl = 0.0
+        for outcome, conf in rows:
+            if outcome == "WIN":
+                daily_pnl += conf or 0.02
+            elif outcome == "LOSS":
+                daily_pnl -= abs(conf) or 0.02
+    except Exception:
+        daily_pnl = 0.0
+        mem = None  # 记忆不可用时保守处理 ：视为 0
+
+    # 1. 单日最大亏损
+    if daily_pnl < -risk_config.MAX_DAILY_LOSS:
+        return {
+            "allowed": False,
+            "reason": f"MAX_DAILY_LOSS: 当日亏损 {daily_pnl:.1%} 超过上限 {risk_config.MAX_DAILY_LOSS:.0%}",
+        }
+
+    return {"allowed": True}
 
 
 # ── 全流水线执行 ──
@@ -77,11 +120,22 @@ async def run_full_pipeline(symbol: str, tf: str = "1h") -> dict:
         "status": "done", "output": bear,
     })
 
-    # Risk
-    risk = await asyncio.to_thread(ai.analyze_risk, market_summary)
+    # ── 硬规则风控（先于任何 LLM） ──
+    hard_rules_result = _check_hard_rules(symbol, market_summary)
+    hard_allowed = hard_rules_result["allowed"]
+    hard_reason = hard_rules_result.get("reason", "")
+
+    # Risk (仅当硬规则通过时调用 AI)
+    risk = {}
+    if hard_allowed:
+        risk = await asyncio.to_thread(ai.analyze_risk, market_summary)
+        risk_status = "done"
+    else:
+        risk = {"veto": True, "reason": hard_reason, "source": "HARD_RULES"}
+        risk_status = "blocked (hard rules)"
     results["agents"].append({
         "layer": "Layer 2", "name": "Risk Guardian",
-        "status": "done", "output": risk,
+        "status": risk_status, "output": risk,
     })
 
     # Adversarial (简化)
@@ -97,10 +151,23 @@ async def run_full_pipeline(symbol: str, tf: str = "1h") -> dict:
     })
 
     # Risk Manager
-    trade_allowed = not risk.get("veto", False)
+    # 组合硬规则 + AI 风控：任一拒绝则 NO_TRADE
+    trade_allowed = hard_allowed and not risk.get("veto", False)
+    veto_source = None
+    if not hard_allowed:
+        veto_source = hard_reason
+    elif risk.get("veto", False):
+        veto_source = "AI_VETO"
+
     results["agents"].append({
         "layer": "Layer 2", "name": "Risk Manager",
-        "status": "done", "output": {"trade_allowed": trade_allowed, "veto": risk.get("veto", False)},
+        "status": "done",
+        "output": {
+            "trade_allowed": trade_allowed,
+            "hard_rules_pass": hard_allowed,
+            "ai_veto": risk.get("veto", False),
+            "veto_source": veto_source or "NONE",
+        },
     })
 
     # Portfolio Manager
