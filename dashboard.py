@@ -434,6 +434,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <div id="scanResult"><div style="color:#555;font-size:12px">每分钟自动扫描 BTC/ETH/SOL，有信号时飞书通知</div></div>
   </div>
 
+  <!-- 复盘 -->
+  <div class="section">
+    <h2>📊 因子复盘 <span id="reviewStatus" style="font-weight:400;font-size:11px;color:#555">—</span></h2>
+    <div id="reviewResult"><div style="color:#555;font-size:12px">等待首次复盘数据...</div></div>
+  </div>
+
   <!-- 回测 -->
   <div class="section">
     <h2>📈 回测</h2>
@@ -554,6 +560,49 @@ async function loadScanStatus(){
 setInterval(loadScanStatus, 10000);
 loadScanStatus();
 
+// ── 加载复盘数据 ──
+async function loadReview(){
+  try {
+    var res = await fetch('/api/review');
+    var d = await res.json();
+    if(d.error || !d.signals_reviewed){
+      document.getElementById('reviewStatus').textContent = '⏳ 尚无数据';
+      return;
+    }
+    var s = d.summary || {};
+    var statusIcon = s.factor_status === 'VALID' ? '🟢' : (s.factor_status === 'MARGINAL' ? '🟡' : '🔴');
+    document.getElementById('reviewStatus').textContent = statusIcon + ' ' + s.factor_status + ' | 信号' + s.total_signals + '笔 | 胜率' + (s.win_rate*100).toFixed(0) + '% | Sharpe ' + s.sharpe.toFixed(2);
+
+    var html = '<div class="dg">';
+    html += '<div class="dc"><div class="l">因子状态</div><div class="v" style="color:' + (s.factor_status==='VALID'?'#7dd56c':s.factor_status==='MARGINAL'?'#ffd700':'#ff6b6b') + '">' + s.factor_status + '</div></div>';
+    html += '<div class="dc"><div class="l">信号数</div><div class="v">' + s.total_signals + '</div></div>';
+    html += '<div class="dc"><div class="l">胜率</div><div class="v g">' + (s.win_rate*100).toFixed(1) + '%</div></div>';
+    html += '<div class="dc"><div class="l">平均盈亏</div><div class="v ' + (s.avg_pnl_pct > 0 ? 'g' : 'r') + '">' + (s.avg_pnl_pct*100).toFixed(2) + '%</div></div>';
+    html += '<div class="dc"><div class="l">Sharpe</div><div class="v">' + s.sharpe.toFixed(2) + '</div></div>';
+    html += '<div class="dc"><div class="l">Sortino</div><div class="v">' + s.sortino.toFixed(2) + '</div></div>';
+    html += '<div class="dc"><div class="l">最大回撤</div><div class="v r">' + (s.max_drawdown*100).toFixed(1) + '%</div></div>';
+    html += '</div>';
+
+    // 按标的
+    var symData = d.by_symbol || {};
+    var symKeys = Object.keys(symData);
+    if(symKeys.length){
+      html += '<div style="margin-top:8px;font-size:11px;color:#889">按标的: ';
+      symKeys.forEach(function(sym){
+        var sd = symData[sym];
+        html += '<span style="margin-right:12px">' + sym + ': ' + sd.signals + '笔 ' + (sd.win_rate*100).toFixed(0) + '%胜率 均' + (sd.avg_pnl_pct*100).toFixed(1) + '%</span>';
+      });
+      html += '</div>';
+    }
+
+    document.getElementById('reviewResult').innerHTML = html;
+  } catch(e){
+    document.getElementById('reviewStatus').textContent = '⏳ 等待首次复盘...';
+  }
+}
+setInterval(loadReview, 30000);
+loadReview();
+
 function renderPipeline(data){
   agentsData = data.agents || [];
   var layers = {};
@@ -668,6 +717,16 @@ async def scanner_status():
         with open(scan_file) as f:
             return json.load(f)
     return {"timestamp": "暂无数据", "signals": []}
+
+
+@app.get("/api/review")
+async def review_status():
+    """返回最新复盘报告"""
+    review_file = Path(__file__).parent / "scanner_data" / "review_report.json"
+    if review_file.exists():
+        with open(review_file) as f:
+            return json.load(f)
+    return {"error": "尚无复盘数据", "signals_reviewed": 0}
 
 
 if __name__ == "__main__":

@@ -223,6 +223,14 @@ async def run_scanner():
     stats = save_stats()
     log(f"📊 今日信号统计: {stats.get('total', 0)} 次 (LONG={stats.get('LONG', 0)}, SHORT={stats.get('SHORT', 0)})")
 
+    # 运行复盘
+    try:
+        from layers.intelligence.review_agent import run_review
+        run_review()
+        log("📋 复盘完成")
+    except Exception as e:
+        log(f"⚠️ 复盘失败: {e}")
+
 
 if __name__ == "__main__":
     asyncio.run(run_scanner())
