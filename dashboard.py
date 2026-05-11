@@ -54,7 +54,7 @@ def _check_hard_rules(symbol: str, market_summary: str) -> dict:
                 daily_pnl -= abs(conf) or 0.02
     except Exception:
         daily_pnl = 0.0
-        mem = None  # 记忆不可用时保守处理 ：视为 0
+        mem = None  # 记忆不可用时保守处理：视为 0
 
     # 1. 单日最大亏损
     if daily_pnl < -risk_config.MAX_DAILY_LOSS:
