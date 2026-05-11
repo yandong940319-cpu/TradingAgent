@@ -97,6 +97,34 @@ class BacktestEngine:
         # 3. 计算指标
         result = self._calculate_metrics(capital, initial_capital, trade_log, equity)
         result["trades"] = trade_log
+
+        # 保存回测结果为 CSV
+        if trade_log:
+            try:
+                import pandas as pd
+                from pathlib import Path
+
+                df = pd.DataFrame(trade_log)
+                df["symbol"] = symbol
+                # 统一字段名
+                rename_map = {
+                    "time": "time",
+                    "action": "signal",
+                    "price": "entry_price",
+                    "signal": "signal",
+                }
+                df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+                # 确保有这几个核心字段
+                for col in ["time", "symbol", "signal", "entry_price"]:
+                    if col not in df.columns:
+                        df[col] = symbol if col == "symbol" else None
+                out_path = Path(__file__).parent.parent / "scanner_data" / "backtest_trades.csv"
+                out_path.parent.mkdir(exist_ok=True)
+                df.to_csv(out_path, index=False)
+                print(f"[Backtest] trades saved to {out_path}")
+            except Exception as e:
+                print(f"[Backtest] CSV save failed: {e}")
+
         result["equity_curve"] = equity
         result["total_klines"] = len(klines)
 
