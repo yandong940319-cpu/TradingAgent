@@ -720,13 +720,12 @@ async def scanner_status():
 
 
 @app.get("/api/review")
-async def review_status():
+async def review_report():
     """返回最新复盘报告"""
     review_file = Path(__file__).parent / "scanner_data" / "review_report.json"
     if review_file.exists():
-        with open(review_file) as f:
-            return json.load(f)
-    return {"error": "尚无复盘数据", "signals_reviewed": 0}
+        return json.loads(review_file.read_text())
+    return {"error": "暂无复盘数据，请先跑回测"}
 
 
 if __name__ == "__main__":
