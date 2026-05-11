@@ -2,8 +2,8 @@
 """
 AI Quant Fund OS — 实时扫描器（多周期信号融合）
 
-对每个标的分别扫描 15m / 30m / 1h / 4h 四个周期，
-仅当四个周期信号一致（全 LONG 或全 SHORT）时才发出通知。
+对每个标的分别扫描 15m / 30m / 1h / 2h / 4h / 6h / 8h / 12h 八个周期，
+仅当至少三个周期信号一致（同为 LONG 或同为 SHORT）时才发出通知。
 """
 
 import sys, os, json, asyncio, time
@@ -15,7 +15,7 @@ from core.deepseek_client import DeepSeekClient
 
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-TIMEFRAMES = ["15m", "30m", "1h", "4h"]         # 分析的周期列表
+TIMEFRAMES = ["15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h"]
 DATA_DIR = Path(__file__).parent / "scanner_data"
 CACHE_DIR = DATA_DIR / "multi_tf"                # 多周期缓存目录
 
@@ -42,7 +42,7 @@ def build_klines_summary(klines: list, max_rows: int = 5) -> str:
 def fuse_signals(tf_results: list) -> dict:
     """
     多周期信号融合。
-    只有所有周期信号一致（全 LONG 或全 SHORT）时才通过。
+    至少三个周期信号一致（同为 LONG 或同为 SHORT）时才通过。
 
     tf_results: [
         {"timeframe": "15m", "signal": "LONG", "confidence": 0.8, "reason": "..."},
@@ -54,33 +54,41 @@ def fuse_signals(tf_results: list) -> dict:
     if not tf_results:
         return {"fusion": "NO_TRADE", "confidence": 0, "details": "无周期数据"}
 
-    # 提取各周期信号
-    signals = [r["signal"] for r in tf_results]
-    unique = set(signals)
+    MIN_AGREE = 3  # 至少三个周期一致才发信号
 
-    # 融合逻辑
-    if len(unique) == 1:
-        single = unique.pop()
-        if single in ("LONG", "SHORT"):
-            avg_conf = sum(r.get("confidence", 0) for r in tf_results) / len(tf_results)
-            min_conf = min(r.get("confidence", 0) for r in tf_results)
-            details = " + ".join(
-                f"{r['timeframe']}={r['signal']}({r.get('confidence',0):.0%})"
-                for r in tf_results
-            )
-            return {
-                "fusion": single,
-                "confidence": round(avg_conf, 3),
-                "min_confidence": round(min_conf, 3),
-                "details": details,
-            }
+    # 统计 LONG / SHORT / NO_TRADE 数量
+    long_count = sum(1 for r in tf_results if r["signal"] == "LONG")
+    short_count = sum(1 for r in tf_results if r["signal"] == "SHORT")
 
-    # 信号不一致或全 NO_TRADE
     details = " | ".join(
         f"{r['timeframe']}={r['signal']}({r.get('confidence',0):.0%})"
         for r in tf_results
     )
-    return {"fusion": "NO_TRADE", "confidence": 0, "details": f"不一致: {details}"}
+
+    if long_count >= MIN_AGREE and short_count >= MIN_AGREE:
+        # 两边都超过阈值——矛盾信号，不发
+        return {"fusion": "NO_TRADE", "confidence": 0, "details": f"矛盾: {details}"}
+
+    if long_count >= MIN_AGREE:
+        matched = [r for r in tf_results if r["signal"] == "LONG"]
+        avg_conf = sum(r.get("confidence", 0) for r in matched) / len(matched)
+        return {
+            "fusion": "LONG",
+            "confidence": round(avg_conf, 3),
+            "details": f"LONG={long_count}/{len(tf_results)} | {details}",
+        }
+
+    if short_count >= MIN_AGREE:
+        matched = [r for r in tf_results if r["signal"] == "SHORT"]
+        avg_conf = sum(r.get("confidence", 0) for r in matched) / len(matched)
+        return {
+            "fusion": "SHORT",
+            "confidence": round(avg_conf, 3),
+            "details": f"SHORT={short_count}/{len(tf_results)} | {details}",
+        }
+
+    # 不足 3 个周期一致
+    return {"fusion": "NO_TRADE", "confidence": 0, "details": f"不足{MIN_AGREE}: {details}"}
 
 
 async def scan_symbol(symbol: str, dc: DataOrchestrator, ai: DeepSeekClient) -> dict:
@@ -167,12 +175,12 @@ async def run_scanner():
         with open(cache_file, "w") as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
 
-        # 仅记录融合信号（所有周期一致）
+        # 仅记录融合信号（至少 3 个周期一致）
         if result["fusion"] in ("LONG", "SHORT"):
             signals_found.append(result)
-            log(f"  ✅ {symbol} 多周期信号一致: {result['fusion']}")
+            log(f"  ✅ {symbol} 融合通过: {result['fusion']} ({result.get('fusion_details','')[:80]})")
         else:
-            log(f"  {symbol} 周期不一致，不发出信号")
+            log(f"  {symbol} 融合未通过: {result.get('fusion_details','')[:120]}")
 
     # 保存整体扫描结果
     scan_result = {
