@@ -28,19 +28,64 @@ dc = DataOrchestrator(
 # ── 硬规则风控（不经过 LLM） ──
 
 
-def _check_hard_rules(symbol: str, market_summary: str) -> dict:
+def _check_hard_rules(symbol: str, market_summary: str, klines: list = None) -> dict:
     """
     执行硬编码风控检查，先于任何 LLM 调用。
+    
+    检查项（全部基于实时市场数据，不依赖记忆体）：
+    1. MAX_VOLATILITY  — 波动率过高则硬拒绝
+    2. PRICE_DEVIATION — 价格偏离均线过远则硬拒绝
+    3. EXTREME_RETURN  — 近期涨跌幅过大则硬拒绝
+    4. MAX_DAILY_LOSS  — 当日亏损检查（从信号日志读取）
 
     返回:
         {"allowed": True}  — 所有硬规则通过
         {"allowed": False, "reason": "..."} — 硬规则拒绝
     """
-    # 从记忆系统读取当日 PnL
+    # ── 规则 1: 波动率检查 ──
+    if klines and len(klines) >= 14:
+        closes = [float(k.get("close", k.get(4, 0))) for k in klines[-14:]]
+        highs = [float(k.get("high", k.get(2, 0))) for k in klines[-14:]]
+        lows = [float(k.get("low", k.get(3, 0))) for k in klines[-14:]]
+        last_close = closes[-1]
+
+        # 计算 ATR（平均真实波幅）/ close
+        tr_sum = 0
+        for i in range(1, len(closes)):
+            hl = highs[i] - lows[i]
+            hc = abs(highs[i] - closes[i - 1])
+            lc = abs(lows[i] - closes[i - 1])
+            tr_sum += max(hl, hc, lc)
+        atr = tr_sum / (len(closes) - 1)
+        volatility_pct = atr / last_close if last_close > 0 else 0
+
+        if volatility_pct > risk_config.MAX_VOLATILITY_PCT:
+            return {
+                "allowed": False,
+                "reason": f"MAX_VOLATILITY: ATR/Close={volatility_pct:.1%} 超过上限 {risk_config.MAX_VOLATILITY_PCT:.0%}",
+            }
+
+        # ── 规则 2: 价格偏离均线 ──
+        ma_20 = sum(closes) / len(closes)
+        deviation = abs(last_close - ma_20) / ma_20
+        if deviation > risk_config.MAX_PRICE_DEVIATION_MA:
+            return {
+                "allowed": False,
+                "reason": f"PRICE_DEVIATION: 偏离均线 {deviation:.1%} 超过上限 {risk_config.MAX_PRICE_DEVIATION_MA:.0%}",
+            }
+
+        # ── 规则 3: 近期累计涨跌幅 ──
+        period_return = (closes[-1] - closes[0]) / closes[0]
+        if abs(period_return) > risk_config.MAX_CUMULATIVE_RETURN_PCT:
+            return {
+                "allowed": False,
+                "reason": f"EXTREME_RETURN: 近期涨跌 {period_return:.1%} 超过上限 {risk_config.MAX_CUMULATIVE_RETURN_PCT:.0%}",
+            }
+
+    # ── 规则 4: 当日亏损检查（从信号日志读取实际跟踪数据） ──
     try:
         mem = MemoryStore()
         today = datetime.now().strftime("%Y-%m-%d")
-        # 查询当天所有交易记录
         with mem._get_conn() as conn:
             rows = conn.execute(
                 "SELECT outcome, confidence FROM episodic WHERE date(created_at) = ?",
@@ -52,18 +97,57 @@ def _check_hard_rules(symbol: str, market_summary: str) -> dict:
                 daily_pnl += conf or 0.02
             elif outcome == "LOSS":
                 daily_pnl -= abs(conf) or 0.02
+        if daily_pnl < -risk_config.MAX_DAILY_LOSS:
+            return {
+                "allowed": False,
+                "reason": f"MAX_DAILY_LOSS: 当日亏损 {daily_pnl:.1%} 超过上限 {risk_config.MAX_DAILY_LOSS:.0%}",
+            }
     except Exception:
-        daily_pnl = 0.0
-        mem = None  # 记忆不可用时保守处理：视为 0
-
-    # 1. 单日最大亏损
-    if daily_pnl < -risk_config.MAX_DAILY_LOSS:
-        return {
-            "allowed": False,
-            "reason": f"MAX_DAILY_LOSS: 当日亏损 {daily_pnl:.1%} 超过上限 {risk_config.MAX_DAILY_LOSS:.0%}",
-        }
+        pass  # 无记忆时跳过此规则
 
     return {"allowed": True}
+
+
+def _cio_rule_filter(bull: dict, bear: dict, risk: dict, regime: dict,
+                     trade_allowed: bool, hard_allowed: bool) -> dict:
+    """
+    CIO 规则层前置过滤。
+    仅当规则层无法明确判断时才调用 LLM。
+
+    返回:
+        {"decision": "LONG"/"SHORT"/"NO_TRADE", "reason": "...", "needs_llm": bool}
+    """
+    risk_veto = risk.get("veto", False)
+    bull_conf = bull.get("confidence", 0)
+    bear_conf = bear.get("confidence", 0)
+    regime_type = regime.get("regime", "UNKNOWN")
+
+    # 规则 1: 硬规则已拒绝 → NO_TRADE（不需要 LLM）
+    if not hard_allowed:
+        return {"decision": "NO_TRADE", "reason": "HARD_RULES_BLOCKED", "needs_llm": False}
+
+    # 规则 2: AI 风控 veto → NO_TRADE（不需要 LLM）
+    if risk_veto:
+        return {"decision": "NO_TRADE", "reason": "AI_RISK_VETO", "needs_llm": False}
+
+    # 规则 3: 多空都无信心 → NO_TRADE（不需要 LLM）
+    if bull_conf < 0.3 and bear_conf < 0.3:
+        return {"decision": "NO_TRADE", "reason": "LOW_CONVICTION_BOTH", "needs_llm": False}
+
+    # 规则 4: 多方信心高且空方极低 → 直接 LONG（不需要 LLM）
+    if bull_conf >= 0.6 and bear_conf < 0.3:
+        return {"decision": "LONG", "reason": "RULE_BULL_DOMINANT", "needs_llm": False}
+
+    # 规则 5: 空方信心高且多方极低 → 直接 SHORT（不需要 LLM）
+    if bear_conf >= 0.6 and bull_conf < 0.3:
+        return {"decision": "SHORT", "reason": "RULE_BEAR_DOMINANT", "needs_llm": False}
+
+    # 规则 6: 极端市场状态 → NO_TRADE（不需要 LLM）
+    if regime_type in ("CRISIS", "HIGH_VOLATILITY"):
+        return {"decision": "NO_TRADE", "reason": f"REGIME_{regime_type}", "needs_llm": False}
+
+    # 规则 7: 多空胶着或矛盾 → 需要 LLM 做最终仲裁
+    return {"decision": "PENDING_LLM", "reason": "RULE_AMBIGUOUS", "needs_llm": True}
 
 
 # ── 全流水线执行 ──
@@ -144,8 +228,8 @@ async def run_full_pipeline(symbol: str, tf: str = "1h") -> dict:
         "status": "done", "output": bear,
     })
 
-    # ── 硬规则风控（先于任何 LLM） ──
-    hard_rules_result = _check_hard_rules(symbol, market_summary)
+    # ── 硬规则风控（基于实时市场数据，不经过 LLM） ──
+    hard_rules_result = _check_hard_rules(symbol, market_summary, klines)
     hard_allowed = hard_rules_result["allowed"]
     hard_reason = hard_rules_result.get("reason", "")
 
@@ -201,12 +285,33 @@ async def run_full_pipeline(symbol: str, tf: str = "1h") -> dict:
         "output": {"position_size": "20%" if trade_allowed else "0%", "cash_ratio": "70%"},
     })
 
-    # Layer 3: CIO — DeepSeek AI 决策
-    cio = await asyncio.to_thread(ai.cio_decision, bull, bear, risk, regime)
+    # Layer 3: CIO — 规则层前置过滤 + AI 仲裁
+    cio = _cio_rule_filter(bull, bear, risk, regime, trade_allowed, hard_allowed)
     results["agents"].append({
-        "layer": "Layer 3", "name": "CIO",
-        "status": "done", "output": cio,
+        "layer": "Layer 3", "name": "CIO Rule Filter",
+        "status": "done",
+        "output": {
+            "rule_decision": cio.get("decision", "NO_TRADE"),
+            "rule_reason": cio.get("reason", ""),
+            "needs_llm": cio.get("needs_llm", False),
+        },
     })
+
+    if cio.get("needs_llm", False):
+        cio_final = await asyncio.to_thread(ai.cio_decision, bull, bear, risk, regime)
+        cio_decision = cio_final.get("decision", "NO_TRADE")
+        cio_reason = cio_final.get("rationale", "")
+        results["agents"].append({
+            "layer": "Layer 3", "name": "CIO AI Arbitration",
+            "status": "done", "output": cio_final,
+        })
+    else:
+        cio_decision = cio["decision"]
+        cio_reason = cio["reason"]
+        results["agents"].append({
+            "layer": "Layer 3", "name": "CIO AI Arbitration",
+            "status": "skipped (rule suffices)", "output": {"decision": cio_decision, "reason": cio_reason},
+        })
 
     # Layer 4: Execution (standby)
     results["agents"].append({
@@ -217,6 +322,18 @@ async def run_full_pipeline(symbol: str, tf: str = "1h") -> dict:
         "layer": "Layer 4", "name": "Exchange Monitor",
         "status": "standby", "output": {"health": "OK"},
     })
+
+    # 追踪信号
+    if cio_decision in ("LONG", "SHORT"):
+        try:
+            from core.signal_tracker import log_signal
+            close_price = float(meta.get("close", 0) or 0)
+            c = cio.get("confidence", 0) or 0.7
+            log_signal(symbol=symbol, signal=cio_decision, price=close_price,
+                       confidence=c,
+                       fusion_details=f"CIO: {cio_reason}", source="dashboard")
+        except Exception:
+            pass
 
     return results
 

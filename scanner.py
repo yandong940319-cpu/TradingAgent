@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from layers.data.orchestrator import DataOrchestrator
 from core.deepseek_client import DeepSeekClient
+from core.signal_tracker import log_signal, save_stats
 
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
@@ -178,6 +179,14 @@ async def run_scanner():
         # 仅记录融合信号（至少 3 个周期一致）
         if result["fusion"] in ("LONG", "SHORT"):
             signals_found.append(result)
+            log_signal(
+                symbol=result["symbol"],
+                signal=result["fusion"],
+                price=result["price"],
+                confidence=result.get("confidence", 0),
+                fusion_details=result.get("fusion_details", ""),
+                source="scanner",
+            )
             log(f"  ✅ {symbol} 融合通过: {result['fusion']} ({result.get('fusion_details','')[:80]})")
         else:
             log(f"  {symbol} 融合未通过: {result.get('fusion_details','')[:120]}")
@@ -209,6 +218,10 @@ async def run_scanner():
         log(f"✅ 检测到 {len(signals_found)} 个融合信号，已保存到本地")
     else:
         log("无融合信号（所有标的周期不一致）")
+
+    # 保存当日统计（用于 MIN_AGREE 验证）
+    stats = save_stats()
+    log(f"📊 今日信号统计: {stats.get('total', 0)} 次 (LONG={stats.get('LONG', 0)}, SHORT={stats.get('SHORT', 0)})")
 
 
 if __name__ == "__main__":
