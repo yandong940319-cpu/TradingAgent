@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+*.egg
+
+# 环境变量
+.env
+*.env.local
+
+# 扫描数据
+scanner_data/
+
+# 日志
+*.log
+*.log.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# 测试临时文件
+test_*.py
+scratch_*.py
