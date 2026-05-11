@@ -8,6 +8,8 @@ import asyncio
 import time
 from datetime import datetime, timedelta
 from typing import Optional
+import pandas as pd
+from pathlib import Path
 
 
 class BacktestEngine:
@@ -98,32 +100,37 @@ class BacktestEngine:
         result = self._calculate_metrics(capital, initial_capital, trade_log, equity)
         result["trades"] = trade_log
 
-        # 保存回测结果为 CSV
+        # 保存回测结果为 CSV（配对开平仓，计算每笔盈亏）
         if trade_log:
-            try:
-                import pandas as pd
-                from pathlib import Path
-
-                df = pd.DataFrame(trade_log)
-                df["symbol"] = symbol
-                # 统一字段名
-                rename_map = {
-                    "time": "time",
-                    "action": "signal",
-                    "price": "entry_price",
-                    "signal": "signal",
-                }
-                df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-                # 确保有这几个核心字段
-                for col in ["time", "symbol", "signal", "entry_price"]:
-                    if col not in df.columns:
-                        df[col] = symbol if col == "symbol" else None
+            rows = []
+            open_trade = None
+            for t in trade_log:
+                action = t["action"]
+                if action in ("BUY", "SELL"):
+                    open_trade = t.copy()
+                    open_trade["symbol"] = symbol
+                elif action in ("CLOSE_LONG", "CLOSE_SHORT") and open_trade:
+                    entry_price = float(open_trade["price"])
+                    exit_price  = float(t["price"])
+                    pnl_pct = (exit_price - entry_price) / entry_price * 100
+                    if open_trade["signal"] == "SHORT":
+                        pnl_pct = -pnl_pct
+                    rows.append({
+                        "time":        open_trade["time"],
+                        "symbol":      symbol,
+                        "signal":      open_trade["signal"],
+                        "entry_price": round(entry_price, 4),
+                        "exit_price":  round(exit_price, 4),
+                        "pnl_pct":     round(pnl_pct, 3),
+                        "outcome":     "WIN" if pnl_pct > 0 else "LOSS",
+                        "position":    open_trade["position"],
+                    })
+                    open_trade = None
+            if rows:
                 out_path = Path(__file__).parent.parent / "scanner_data" / "backtest_trades.csv"
                 out_path.parent.mkdir(exist_ok=True)
-                df.to_csv(out_path, index=False)
-                print(f"[Backtest] trades saved to {out_path}")
-            except Exception as e:
-                print(f"[Backtest] CSV save failed: {e}")
+                pd.DataFrame(rows).to_csv(out_path, index=False)
+                print(f"[Backtest] {len(rows)} trades saved → {out_path}")
 
         result["equity_curve"] = equity
         result["total_klines"] = len(klines)
