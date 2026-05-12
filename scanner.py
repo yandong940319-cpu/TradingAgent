@@ -197,12 +197,26 @@ async def run_scanner():
             )
             # 飞书私聊推送
             price_str = f"${result['price']:,.2f}" if result['price'] > 0 else "?"
+            direction = result['fusion']
+            direction_emoji = "🟢" if direction == "LONG" else "🔴"
+            conf = result.get('confidence', 0)
+            conf_bar = "█" * int(conf * 10) + "░" * (10 - int(conf * 10))
+
+            # 从多时间框架结果里提取详情
+            tf_result = result.get("timeframe_results", [{}])[0]
+            trend = tf_result.get("trend_state", "?") if isinstance(tf_result, dict) else "?"
+            trigger = tf_result.get("trigger_type", "?") if isinstance(tf_result, dict) else "?"
+
             msg = (
-                f"🚨 交易信号: {result['symbol']}\n"
-                f"方向: {result['fusion']}\n"
-                f"价格: {price_str}\n"
-                f"信心: {result.get('confidence', 0):.0%}\n"
-                f"原因: {result.get('fusion_details', '')[:120]}"
+                f"{direction_emoji} {direction} 信号 | {result['symbol']}\n"
+                f"{'━' * 28}\n"
+                f"价格:   {price_str}\n"
+                f"置信度: {conf_bar} {conf:.0%}\n"
+                f"趋势:   {trend}\n"
+                f"触发:   {trigger}\n"
+                f"{'━' * 28}\n"
+                f"原因: {result.get('fusion_details', '')[:150]}\n"
+                f"时间: {result['time']}"
             )
             send_dm(msg)
             log(f"  ✅ {symbol} 融合通过: {result['fusion']} ({result.get('fusion_details','')[:80]})")
