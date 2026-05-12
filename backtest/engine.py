@@ -170,35 +170,52 @@ class BacktestEngine:
 
     async def _simulate_pipeline(self, kline: dict, history: list = None) -> str:
         """两阶段架构：经典指标过滤 → LLM 审查"""
-        recent = (history or [kline])[-20:]
+        recent = (history or [kline])[-35:]  # 用 35 根以提供足够 RSI_MA 窗口
         closes = [float(k.get("close", k.get(4, 0))) for k in recent]
         volumes = [float(k.get("volume", k.get(5, 0))) for k in recent]
 
         # ── 第一阶段：经典指标生成信号 ──────────────────
-        # RSI(14)
-        gains, losses = [], []
-        for i in range(1, len(closes)):
-            d = closes[i] - closes[i - 1]
-            (gains if d > 0 else losses).append(abs(d))
-        avg_gain = sum(gains[-14:]) / 14 if len(gains) >= 14 else 0.001
-        avg_loss = sum(losses[-14:]) / 14 if len(losses) >= 14 else 0.001
-        rsi = 100 - (100 / (1 + avg_gain / avg_loss))
+        # RSI(14) 序列
+        rsi_list = []
+        for i in range(14, len(closes)):
+            chunk = closes[i - 14:i + 1]
+            gains = [chunk[j] - chunk[j - 1] for j in range(1, len(chunk)) if chunk[j] > chunk[j - 1]]
+            losses = [abs(chunk[j] - chunk[j - 1]) for j in range(1, len(chunk)) if chunk[j] <= chunk[j - 1]]
+            avg_g = sum(gains) / 14 if len(gains) >= 14 else 0.001
+            avg_l = sum(losses) / 14 if len(losses) >= 14 else 0.001
+            rsi_list.append(100 - (100 / (1 + avg_g / avg_l)))
+        rsi = rsi_list[-1] if rsi_list else 50
 
-        # MA5 vs MA20
-        ma5 = sum(closes[-5:]) / 5 if len(closes) >= 5 else closes[-1]
+        # RSI 相对均值
+        import statistics
+        rsi_ma = statistics.mean(rsi_list[-20:]) if len(rsi_list) >= 20 else (rsi if rsi_list else 50)
+
+        # MA5 / MA10 / MA20
+        ma5  = sum(closes[-5:]) / 5 if len(closes) >= 5 else closes[-1]
+        ma10 = sum(closes[-10:]) / 10 if len(closes) >= 10 else closes[-1]
         ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else closes[-1]
         price = closes[-1]
+
+        # 前一根的 MA5 / MA10（用于金叉死叉判断）
+        prev_ma5  = sum(closes[-6:-1]) / 5 if len(closes) >= 6 else ma5
+        prev_ma10 = sum(closes[-11:-1]) / 10 if len(closes) >= 11 else ma10
 
         # 成交量比
         vol_ratio = (sum(volumes[-3:]) / 3) / (sum(volumes[-10:]) / 10) if len(volumes) >= 10 else 1.0
 
-        # 规则生成候选信号
-        if rsi < 40 and price > ma5 and vol_ratio > 1.0:
-            candidate = "LONG"   # 超卖后开始反弹（RSI低但价格已回到MA5上方）
-        elif rsi > 60 and price < ma5 and vol_ratio > 1.0:
-            candidate = "SHORT"  # 超买后开始回落（RSI高但价格已跌破MA5）
+        # 规则：金叉/超卖 OR 死叉/超买 → MA20 + 成交量过滤
+        rsi_low  = rsi < rsi_ma * 0.95
+        rsi_high = rsi > rsi_ma * 1.05
+
+        golden_cross = prev_ma5 < prev_ma10 and ma5 > ma10
+        death_cross  = prev_ma5 > prev_ma10 and ma5 < ma10
+
+        if (golden_cross or rsi_low) and price > ma20 and vol_ratio > 1.0:
+            candidate = "LONG"
+        elif (death_cross or rsi_high) and price < ma20 and vol_ratio > 1.0:
+            candidate = "SHORT"
         else:
-            return "NO_TRADE"   # 规则不满足，直接跳过，不调 LLM
+            return "NO_TRADE"
 
         # ── 第二阶段：LLM 审查候选信号 ──────────────────
         from core.deepseek_client import DeepSeekClient
