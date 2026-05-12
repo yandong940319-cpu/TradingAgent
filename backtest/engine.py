@@ -193,9 +193,9 @@ class BacktestEngine:
         import requests
         base = "https://api.binance.com"
 
-        # 计算 1 年前的毫秒时间戳
+        # 计算 5 年前的毫秒时间戳
         end_ms = int(_time.time() * 1000)
-        start_ms = end_ms - int(1 * 365.25 * 24 * 3600 * 1000)
+        start_ms = end_ms - int(5 * 365.25 * 24 * 3600 * 1000)
 
         all_klines = []
         while start_ms < end_ms:
