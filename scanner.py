@@ -15,7 +15,7 @@ from core.deepseek_client import DeepSeekClient
 from core.signal_tracker import log_signal, save_stats
 
 
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+SYMBOLS = ["BTCUSDT", "SOLUSDT"]
 TIMEFRAMES = ["15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h"]
 DATA_DIR = Path(__file__).parent / "scanner_data"
 CACHE_DIR = DATA_DIR / "multi_tf"                # 多周期缓存目录

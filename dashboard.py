@@ -408,7 +408,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <h2>🔍 查询</h2>
     <div style="margin-bottom:6px">
       <button class="sym-btn" onclick="q('BTCUSDT')">BTC/USDT</button>
-      <button class="sym-btn" onclick="q('ETHUSDT')">ETH/USDT</button>
+      <button class="sym-btn" onclick="q('SOLUSDT')">SOL/USDT</button>
       <button class="sym-btn" onclick="q('sh.600519')">贵州茅台</button>
       <button class="sym-btn" onclick="q('sh.600000')">浦发银行</button>
     </div>
