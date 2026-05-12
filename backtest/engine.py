@@ -256,10 +256,10 @@ class BacktestEngine:
         # 成交量比
         vol_ratio = (sum(volumes[-3:]) / 3) / (sum(volumes[-10:]) / 10) if len(volumes) >= 10 else 1.0
 
-        # ── Regime 检测层：MA50 < MA200 → 熊市，不做多 ──
+        # ── Regime 检测层：MA50 < MA200 且价格在 MA200 下方 → 熊市，不做多 ──
         if ma50 is not None and ma200 is not None:
-            if ma50 < ma200:
-                # 死叉状态：MA50 在 MA200 下方 = 熊市，不做多
+            if ma50 < ma200 and price < ma200:
+                # MA50 在 MA200 下方且价格低于 MA200 = 确认熊市，不做多
                 return "NO_TRADE"
 
         # ── 规则：金叉/超卖 → MA20 + 成交量过滤 ──
