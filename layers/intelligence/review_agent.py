@@ -103,6 +103,21 @@ def run_review():
     for sym, s in by_sym.items():
         lines.append(f"{sym}: 胜率 {s['win_rate']*100:.0f}%  "
                      f"Sharpe {s['sharpe']}  trades {s['total']}")
+
+    # ── HARD_STOP 分析 ──
+    if "exit_reason" in df.columns:
+        stops = df[df["exit_reason"] == "HARD_STOP"]
+        if not stops.empty:
+            lines.append("─" * 45)
+            lines.append("HARD_STOP 分析:")
+            lines.append(f"  总计: {len(stops)} 笔")
+            long_stops = len(stops[stops['signal'] == 'LONG'])
+            short_stops = len(stops[stops['signal'] == 'SHORT'])
+            lines.append(f"  LONG止损: {long_stops} 笔  SHORT止损: {short_stops} 笔")
+            if 'hold_days' in stops.columns:
+                lines.append(f"  平均持仓天数: {stops['hold_days'].mean():.1f} 天")
+            lines.append(f"  止损时均盈亏: {stops['pnl_pct'].mean():.2f}%")
+
     lines.append("=" * 45)
     summary = "\n".join(lines)
 

@@ -84,6 +84,8 @@ class BacktestEngine:
                         "price": price,
                         "position": 0,
                         "signal": exit_reason,
+                        "hold_days": hold_days,
+                        "exit_reason": exit_reason,
                     })
                     position = 0
                     # 跳过本根 K 线的开仓逻辑（但不跳过权益计算）
@@ -156,6 +158,8 @@ class BacktestEngine:
                         "pnl_pct":     round(pnl_pct, 3),
                         "outcome":     "WIN" if pnl_pct > 0 else "LOSS",
                         "position":    open_trade["position"],
+                        "hold_days":   t.get("hold_days", 0),
+                        "exit_reason": t.get("exit_reason", ""),
                     })
                     open_trade = None
             if rows:
