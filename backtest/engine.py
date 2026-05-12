@@ -288,24 +288,8 @@ class BacktestEngine:
                 return "NO_TRADE"
 
         elif regime == "BEAR":
-            # 熊市主做 SHORT，需第二根 K 线确认
-            if (death_cross or rsi > rsi_ma * 1.05) and vol_ratio > 1.0:
-                # 加确认：当前收盘价必须低于前一根收盘价（趋势延续确认）
-                if closes[-1] < closes[-2]:
-                    candidate = "SHORT"
-                else:
-                    return "NO_TRADE"  # 死叉出现但当根是阳线，等下一根确认
-
-            # 同时监测熊末反转：价格连续3根收涨 + 成交量放大 + RSI开始回升
-            elif (
-                closes[-1] > closes[-2] > closes[-3]        # 连续3根阳线
-                and vol_ratio > 1.2                          # 成交量放大
-                and rsi > rsi_ma * 0.98                      # RSI 不再创新低
-                and closes[-1] > ma20                        # 价格收复 MA20
-            ):
-                candidate = "LONG"  # 熊末抄底信号
-            else:
-                return "NO_TRADE"
+            # 熊市不做空，等待牛市信号
+            return "NO_TRADE"
         else:
             return "NO_TRADE"
 
