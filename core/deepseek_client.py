@@ -138,46 +138,76 @@ class DeepSeekClient:
 
     def scan_signal(self, symbol: str, klines_summary: str, n_klines: int = 20) -> dict:
         """扫描信号（供 scanner / 回测使用）"""
-        system_prompt = """你是一个严格的量化交易信号过滤器。
+        system_prompt = """你是一个量化交易信号评分器。
 
-核心原则：
-- 宁可不交易，不可乱交易
-- 没有强烈确信就输出 NO_TRADE
-- 只在满足全部条件时才输出 LONG 或 SHORT
+评分规则（每项独立打分，总分 0~100）：
 
-输出 LONG 的条件（必须全部满足）：
-1. 近期收盘价连续高于前5根均值
-2. 成交量有放大迹象（近3根 > 前10根均量）
-3. 无明显顶部形态（非连续大阳线后高位横盘）
-4. confidence >= 0.65
+趋势方向（40分）：
+- 最新收盘价 > 前5根均值 → +20分（多头倾向）
+- 最新收盘价 < 前5根均值 → -20分（空头倾向）
+- 最新收盘价 > 前20根均值 → +20分
+- 最新收盘价 < 前20根均值 → -20分
 
-输出 SHORT 的条件（必须全部满足）：
-1. 近期收盘价连续低于前5根均值
-2. 成交量有放大迹象
-3. 无明显底部形态
-4. confidence >= 0.65
+成交量（30分）：
+- 近3根均量 > 前10根均量 1.2倍 → +30分
+- 近3根均量 < 前10根均量 0.8倍 → +10分（缩量，中性偏弱）
+- 其他 → +15分
 
-其余所有情况输出 NO_TRADE。
+波动率（30分）：
+- 最近5根的高低点范围 < 前20根平均范围的80% → +30分（低波动，适合建仓）
+- 最近5根的高低点范围 > 前20根平均范围的150% → +0分（高波动，风险大）
+- 其他 → +15分
 
-只返回 JSON，不要任何解释文字。"""
+信号判定：
+- 总分 >= 70 且趋势得分为正 → LONG，confidence = 总分/100
+- 总分 >= 70 且趋势得分为负 → SHORT，confidence = 总分/100
+- 总分 < 70 → NO_TRADE
+
+只返回 JSON，不要任何解释。"""
 
         result = self.chat([
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"""分析 {symbol} 最近 {n_klines} 根日线K线，判断当前是否有交易机会。
+            {"role": "user", "content": f"""分析 {symbol} 最近 {n_klines} 根日线K线。
 
 K线数据（从旧到新）：
 {klines_summary}
 
-必须返回以下格式：
+返回格式：
 {{"signal": "LONG/SHORT/NO_TRADE",
   "confidence": 0.0~1.0,
-  "reason": "一句话说明核心理由",
-  "regime": "BULL/BEAR/RANGING",
-  "key_level": "关键价位"}}
-
-再次强调：不确定就返回 NO_TRADE。"""},
+  "score": 0~100,
+  "reason": "一句话核心理由",
+  "regime": "BULL/BEAR/RANGING"}}"""},
         ], temperature=0.2, max_tokens=500)
         return self._parse_json(result, {"signal": "NO_TRADE", "confidence": 0, "reason": "API_FAILED"})
+
+    def validate_signal(self, data: dict) -> dict:
+        """审查候选信号（供回测两阶段架构使用）"""
+        system = """你是交易信号审查员。
+量化模型已经生成了一个候选信号，你的唯一职责是判断是否有明显理由拒绝它。
+默认通过，只在有强烈反对理由时才拒绝。
+只返回 JSON。"""
+
+        user = f"""候选信号: {data['candidate']}
+标的: {data['symbol']}
+RSI: {data['rsi']} | MA5: {data['ma5']} | MA20: {data['ma20']}
+成交量比: {data['vol_ratio']}
+近10根收盘/成交量:
+{data['recent_10']}
+
+是否通过审查？
+{{"decision": "LONG/SHORT/NO_TRADE", "reason": "一句话", "confidence": 0.0~1.0}}
+
+只在以下情况拒绝：
+1. 数据明显异常（成交量暴增10倍以上）
+2. 信号方向与近期强趋势完全相反
+3. 其他 → 保持候选信号方向"""
+
+        result = self.chat([
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ], temperature=0.2, max_tokens=300)
+        return self._parse_json(result, {"decision": data.get("candidate", "NO_TRADE"), "reason": "API_FAILED"})
 
     def _parse_json(self, text: Optional[str], default: dict) -> dict:
         """解析 JSON 响应"""

@@ -169,24 +169,54 @@ class BacktestEngine:
         return []
 
     async def _simulate_pipeline(self, kline: dict, history: list = None) -> str:
-        """调用 DeepSeek Agent，基于最近 20 根 K 线返回信号"""
-        from core.deepseek_client import DeepSeekClient
-
-        # 用最近20根K线构建上下文
+        """两阶段架构：经典指标过滤 → LLM 审查"""
         recent = (history or [kline])[-20:]
-        lines = []
-        for k in recent:
-            t = k.get("date", k.get("time", ""))
-            c = float(k.get("close", k.get(4, 0)))
-            h = float(k.get("high",  k.get(2, c)))
-            l = float(k.get("low",   k.get(3, c)))
-            v = float(k.get("volume",k.get(5, 0)))
-            lines.append(f"time={t} H={h:.0f} L={l:.0f} C={c:.0f} V={v:.0f}")
+        closes = [float(k.get("close", k.get(4, 0))) for k in recent]
+        volumes = [float(k.get("volume", k.get(5, 0))) for k in recent]
 
-        summary = "\n".join(lines)
+        # ── 第一阶段：经典指标生成信号 ──────────────────
+        # RSI(14)
+        gains, losses = [], []
+        for i in range(1, len(closes)):
+            d = closes[i] - closes[i - 1]
+            (gains if d > 0 else losses).append(abs(d))
+        avg_gain = sum(gains[-14:]) / 14 if len(gains) >= 14 else 0.001
+        avg_loss = sum(losses[-14:]) / 14 if len(losses) >= 14 else 0.001
+        rsi = 100 - (100 / (1 + avg_gain / avg_loss))
+
+        # MA5 vs MA20
+        ma5 = sum(closes[-5:]) / 5 if len(closes) >= 5 else closes[-1]
+        ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else closes[-1]
+        price = closes[-1]
+
+        # 成交量比
+        vol_ratio = (sum(volumes[-3:]) / 3) / (sum(volumes[-10:]) / 10) if len(volumes) >= 10 else 1.0
+
+        # 规则生成候选信号
+        if rsi < 35 and price > ma20 and vol_ratio > 1.1:
+            candidate = "LONG"
+        elif rsi > 65 and price < ma20 and vol_ratio > 1.1:
+            candidate = "SHORT"
+        else:
+            return "NO_TRADE"   # 规则不满足，直接跳过，不调 LLM
+
+        # ── 第二阶段：LLM 审查候选信号 ──────────────────
+        from core.deepseek_client import DeepSeekClient
+        summary = "\n".join(
+            f"C={c:.0f} V={v:.0f}" for c, v in zip(closes[-10:], volumes[-10:])
+        )
+        prompt_data = {
+            "symbol":    self._symbol,
+            "candidate": candidate,
+            "rsi":       round(rsi, 1),
+            "ma5":       round(ma5, 1),
+            "ma20":      round(ma20, 1),
+            "vol_ratio": round(vol_ratio, 2),
+            "recent_10": summary,
+        }
         ai = DeepSeekClient()
-        result = await asyncio.to_thread(ai.scan_signal, self._symbol, summary, len(recent))
-        return result.get("signal", "NO_TRADE")
+        result = await asyncio.to_thread(ai.validate_signal, prompt_data)
+        return result.get("decision", "NO_TRADE")
 
     def _calculate_metrics(self, final: float, initial: float,
                            trades: list, equity: list) -> dict:
