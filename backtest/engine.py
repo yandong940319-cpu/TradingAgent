@@ -65,7 +65,13 @@ class BacktestEngine:
                 exit_reason = ""
 
                 # 第一级：硬止损——任何时候都触发
-                if pnl <= -STOP_LOSS:
+                # 动态止损：持仓超过20根且有盈利时收紧保护
+                if hold_bars > 20 and pnl > 0:
+                    effective_stop = pnl - 0.01  # 最多回吐 1%
+                else:
+                    effective_stop = -STOP_LOSS  # 正常 2% 止损
+
+                if pnl <= effective_stop:
                     should_exit = True
                     exit_reason = "HARD_STOP"
 
