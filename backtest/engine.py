@@ -248,7 +248,7 @@ class BacktestEngine:
         if (golden_cross or rsi_low) and price > ma20 and vol_ratio > 1.0:
             candidate = "LONG"
         elif (death_cross or rsi_high) and price < ma20 and vol_ratio > 1.0:
-            candidate = "SHORT"
+            return "NO_TRADE"  # BTC 牛市结构下暂停空单
         else:
             return "NO_TRADE"
 
