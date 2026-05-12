@@ -268,11 +268,18 @@ class BacktestEngine:
         death_cross  = prev_ma5 > prev_ma10 and ma5 < ma10
 
         if regime == "BULL":
-            if (golden_cross or rsi < rsi_ma * 0.95) and vol_ratio > 1.0:
+            # 牛市不追金叉，等回调到 MA20 附近再入场
+            near_ma20 = abs(price - ma20) / ma20 < 0.03  # 价格在 MA20 ±3% 以内
+            rsi_cooling = rsi < rsi_ma * 0.97             # RSI 相对偏低，短期冷却
+            bouncing = closes[-1] > closes[-2]            # 最新一根是阳线（开始反弹）
+
+            if near_ma20 and rsi_cooling and bouncing and vol_ratio > 1.0:
                 candidate = "LONG"
             else:
                 return "NO_TRADE"
+
         elif regime == "BEAR":
+            # 熊市保持原有死叉逻辑，已经有效
             if (death_cross or rsi > rsi_ma * 1.05) and vol_ratio > 1.0:
                 candidate = "SHORT"
             else:
