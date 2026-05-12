@@ -38,85 +38,83 @@ class BacktestEngine:
         trade_log = []
         equity = [{"time": klines[0]["date" if "date" in klines[0] else "time"], "equity": capital}]
         self._symbol = symbol
-        entry_price = 0.0   # 开仓价，用于止盈止损
-        STOP_LOSS   = 0.02  # 2% 止损
-        TAKE_PROFIT = 0.04  # 4% 止盈
+        entry_price = 0.0    # 开仓价
+        entry_index = -1     # 开仓时的 K 线索引
+        STOP_LOSS     = 0.02 # 2% 硬止损，任何情况都触发
+        TAKE_PROFIT   = 0.04 # 4% 止盈
+        MIN_HOLD_DAYS = 3    # 最少持仓天数，但止损例外
 
         for i in range(len(klines)):
             k = klines[i]
             price = float(k.get("close", k.get(4, 0)))
 
-            # ── 止盈止损检查（先于新信号） ──
-            if position > 0 and entry_price > 0:
-                ret = (price - entry_price) / entry_price
-                if ret <= -STOP_LOSS or ret >= TAKE_PROFIT:
-                    reason = "STOP_LOSS" if ret <= -STOP_LOSS else "TAKE_PROFIT"
+            # ── 三级退出检查（先于新信号） ──
+            if position != 0 and entry_price > 0:
+                hold_days = i - entry_index
+                pnl = (price - entry_price) / entry_price
+                if position < 0:
+                    pnl = -pnl
+
+                should_exit = False
+                exit_reason = ""
+
+                # 第一级：硬止损——无条件触发，不受持仓天数限制
+                if pnl <= -STOP_LOSS:
+                    should_exit = True
+                    exit_reason = "HARD_STOP"
+
+                # 第二级：止盈——无条件触发
+                elif pnl >= TAKE_PROFIT:
+                    should_exit = True
+                    exit_reason = "TAKE_PROFIT"
+
+                # 第三级：持仓满最少天数后，AI 才能介入平仓
+                elif hold_days >= MIN_HOLD_DAYS:
+                    signal = await self._simulate_pipeline(k, history=klines[:i + 1])
+                    expected_dir = "LONG" if position > 0 else "SHORT"
+                    if signal == "NO_TRADE" or signal != expected_dir:
+                        should_exit = True
+                        exit_reason = "AI_EXIT"
+
+                if should_exit:
+                    action = "CLOSE_LONG" if position > 0 else "CLOSE_SHORT"
                     trade_log.append({
                         "time": k.get("date", k.get("time", "")),
-                        "action": "CLOSE_LONG",
+                        "action": action,
                         "price": price,
                         "position": 0,
-                        "signal": reason,
+                        "signal": exit_reason,
                     })
                     position = 0
-                    continue  # 跳过本根 K 线的信号
-            elif position < 0 and entry_price > 0:
-                ret = (entry_price - price) / entry_price
-                if ret <= -STOP_LOSS or ret >= TAKE_PROFIT:
-                    reason = "STOP_LOSS" if ret <= -STOP_LOSS else "TAKE_PROFIT"
+                    # 跳过本根 K 线的开仓逻辑（但不跳过权益计算）
+                    # 让 equity.append 在下面执行
+
+            # ── 开仓逻辑（仅在无持仓时） ──
+            if position == 0:
+                signal = await self._simulate_pipeline(k, history=klines[:i + 1])
+
+                if signal == "LONG":
+                    position = 0.2
+                    entry_price = price
+                    entry_index = i
                     trade_log.append({
                         "time": k.get("date", k.get("time", "")),
-                        "action": "CLOSE_SHORT",
+                        "action": "BUY",
                         "price": price,
-                        "position": 0,
-                        "signal": reason,
-                    })
-                    position = 0
-                    continue  # 跳过本根 K 线的信号
-
-            # 每根 K 线运行分析流水线（传全部历史 K 线做上下文）
-            signal = await self._simulate_pipeline(k, history=klines[:i + 1])
-
-            # 根据信号调整仓位
-            if signal == "LONG" and position < 0.5:
-                position = 0.2
-                entry_price = price
-                trade_log.append({
-                    "time": k.get("date", k.get("time", "")),
-                    "action": "BUY",
-                    "price": price,
-                    "position": position,
-                    "signal": signal,
-                })
-            elif signal == "SHORT" and position > -0.3:
-                position = -0.1
-                entry_price = price
-                trade_log.append({
-                    "time": k.get("date", k.get("time", "")),
-                    "action": "SELL",
-                    "price": price,
-                    "position": position,
-                    "signal": signal,
-                })
-            elif signal == "NO_TRADE" and abs(position) > 0:
-                # 平仓
-                if position > 0:
-                    trade_log.append({
-                        "time": k.get("date", k.get("time", "")),
-                        "action": "CLOSE_LONG",
-                        "price": price,
-                        "position": 0,
+                        "position": position,
                         "signal": signal,
                     })
-                elif position < 0:
+                elif signal == "SHORT":
+                    position = -0.1
+                    entry_price = price
+                    entry_index = i
                     trade_log.append({
                         "time": k.get("date", k.get("time", "")),
-                        "action": "CLOSE_SHORT",
+                        "action": "SELL",
                         "price": price,
-                        "position": 0,
+                        "position": position,
                         "signal": signal,
                     })
-                position = 0
 
             # 计算当前权益
             if i > 0:
