@@ -193,10 +193,10 @@ class BacktestEngine:
         vol_ratio = (sum(volumes[-3:]) / 3) / (sum(volumes[-10:]) / 10) if len(volumes) >= 10 else 1.0
 
         # 规则生成候选信号
-        if rsi < 35 and price > ma20 and vol_ratio > 1.1:
-            candidate = "LONG"
-        elif rsi > 65 and price < ma20 and vol_ratio > 1.1:
-            candidate = "SHORT"
+        if rsi < 40 and price > ma5 and vol_ratio > 1.0:
+            candidate = "LONG"   # 超卖后开始反弹（RSI低但价格已回到MA5上方）
+        elif rsi > 60 and price < ma5 and vol_ratio > 1.0:
+            candidate = "SHORT"  # 超买后开始回落（RSI高但价格已跌破MA5）
         else:
             return "NO_TRADE"   # 规则不满足，直接跳过，不调 LLM
 
