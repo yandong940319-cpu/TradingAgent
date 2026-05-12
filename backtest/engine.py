@@ -38,10 +38,41 @@ class BacktestEngine:
         trade_log = []
         equity = [{"time": klines[0]["date" if "date" in klines[0] else "time"], "equity": capital}]
         self._symbol = symbol
+        entry_price = 0.0   # 开仓价，用于止盈止损
+        STOP_LOSS   = 0.02  # 2% 止损
+        TAKE_PROFIT = 0.04  # 4% 止盈
 
         for i in range(len(klines)):
             k = klines[i]
             price = float(k.get("close", k.get(4, 0)))
+
+            # ── 止盈止损检查（先于新信号） ──
+            if position > 0 and entry_price > 0:
+                ret = (price - entry_price) / entry_price
+                if ret <= -STOP_LOSS or ret >= TAKE_PROFIT:
+                    reason = "STOP_LOSS" if ret <= -STOP_LOSS else "TAKE_PROFIT"
+                    trade_log.append({
+                        "time": k.get("date", k.get("time", "")),
+                        "action": "CLOSE_LONG",
+                        "price": price,
+                        "position": 0,
+                        "signal": reason,
+                    })
+                    position = 0
+                    continue  # 跳过本根 K 线的信号
+            elif position < 0 and entry_price > 0:
+                ret = (entry_price - price) / entry_price
+                if ret <= -STOP_LOSS or ret >= TAKE_PROFIT:
+                    reason = "STOP_LOSS" if ret <= -STOP_LOSS else "TAKE_PROFIT"
+                    trade_log.append({
+                        "time": k.get("date", k.get("time", "")),
+                        "action": "CLOSE_SHORT",
+                        "price": price,
+                        "position": 0,
+                        "signal": reason,
+                    })
+                    position = 0
+                    continue  # 跳过本根 K 线的信号
 
             # 每根 K 线运行分析流水线（传全部历史 K 线做上下文）
             signal = await self._simulate_pipeline(k, history=klines[:i + 1])
@@ -49,6 +80,7 @@ class BacktestEngine:
             # 根据信号调整仓位
             if signal == "LONG" and position < 0.5:
                 position = 0.2
+                entry_price = price
                 trade_log.append({
                     "time": k.get("date", k.get("time", "")),
                     "action": "BUY",
@@ -58,6 +90,7 @@ class BacktestEngine:
                 })
             elif signal == "SHORT" and position > -0.3:
                 position = -0.1
+                entry_price = price
                 trade_log.append({
                     "time": k.get("date", k.get("time", "")),
                     "action": "SELL",
