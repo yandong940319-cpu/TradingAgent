@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 import pandas as pd
 from pathlib import Path
+from layers.intelligence.multi_tf_signal import compute_signal, klines_to_df, resample_to_3day
 
 
 class BacktestEngine:
@@ -20,17 +21,26 @@ class BacktestEngine:
         self.trades = []
         self.equity_curve = []
 
-    async def run(self, symbol: str, start_date: str, end_date: str,
-                  timeframe: str = "1d", initial_capital: float = 10000) -> dict:
+    async def run(self, symbol: str, start_date: str = "", end_date: str = "",
+                  timeframe: str = "15m", initial_capital: float = 10000, days: int = 0) -> dict:
         """执行回测"""
-        print(f"[Backtest] Starting backtest for {symbol} ({start_date} ~ {end_date})")
+        print(f"[Backtest] Starting backtest for {symbol}")
 
-        # 1. 获取历史数据
-        klines = await self._fetch_historical(symbol, timeframe, start_date, end_date)
+        # 1. 获取历史数据（主周期 + 多时间框架）
+        klines = await self._fetch_historical(symbol, timeframe, days=days)
         if not klines:
             return {"error": "No data fetched"}
 
         print(f"[Backtest] Fetched {len(klines)} klines")
+
+        # 拉取多时间框架数据
+        self.all_data = {}
+        mtf_tfs = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d", "1w": "1w"}
+        for name, tf in mtf_tfs.items():
+            raw = await self._fetch_historical(symbol, tf, days=days)
+            self.all_data[name] = klines_to_df(raw)
+
+        daily_df = self.all_data.get("1d", pd.DataFrame())
 
         # 2. 逐根 K 线运行流水线
         capital = initial_capital
@@ -41,10 +51,10 @@ class BacktestEngine:
         entry_price = 0.0     # 开仓价
         entry_index = -1      # 开仓时的 K 线索引
         peak_pnl    = 0.0     # 持仓期间最高盈利
-        STOP_LOSS       = 0.02  # 2% 硬止损，任何情况都触发
-        TRAILING_START  = 0.01  # 盈利超过 1% 启动追踪止损
+        STOP_LOSS       = 0.015  # 1.5% 硬止损，任何情况都触发
+        TRAILING_START  = 0.005  # 盈利超过 0.5% 启动追踪止损
         TRAILING_STEP   = 0.005 # 追踪止损回撤 0.5% 触发
-        MIN_HOLD_BARS   = 8     # 最少持仓 K 线数（15m × 8 = 2小时）
+        MIN_HOLD_BARS   = 768   # 最少持仓 K 线数（15m × 768 = 8天）
         TAKE_PROFIT     = 0.04  # 固定止盈 4%
 
         for i in range(len(klines)):
@@ -104,8 +114,18 @@ class BacktestEngine:
 
             # ── 开仓逻辑（仅在无持仓时） ──
             if position == 0:
+                # 每96根15m才检查一次信号（= 每根日线）
+                if i % 96 != 0:
+                    continue
                 peak_pnl = 0.0  # 重置追踪止损基线
-                signal = await self._simulate_pipeline(k, history=klines[:i + 1])
+                # 找当前 K 线对应的日线索引
+                bar_time = k.get("time", k.get(0, 0))
+                daily_idx = -1
+                if not daily_df.empty:
+                    matched = daily_df[daily_df["time"] <= bar_time].index
+                    if len(matched):
+                        daily_idx = int(matched[-1])
+                signal = self._simulate_pipeline(symbol, daily_idx)
 
                 if signal == "LONG":
                     position = 0.2
@@ -187,15 +207,18 @@ class BacktestEngine:
         return result
 
     async def _fetch_historical(self, symbol: str, tf: str,
-                                 start: str, end: str) -> list:
+                                 start: str = "", end: str = "", days: int = 0) -> list:
         """获取 5 年历史 K 线数据（分页拉取）"""
         import time as _time
         import requests
         base = "https://api.binance.com"
 
-        # 计算 5 年前的毫秒时间戳
+        # 计算数据毫秒时间戳
         end_ms = int(_time.time() * 1000)
-        start_ms = end_ms - int(5 * 365.25 * 24 * 3600 * 1000)
+        if days and days > 0:
+            start_ms = end_ms - int(days * 24 * 3600 * 1000)
+        else:
+            start_ms = end_ms - int(5 * 365.25 * 24 * 3600 * 1000)
 
         all_klines = []
         while start_ms < end_ms:
@@ -231,85 +254,50 @@ class BacktestEngine:
         print(f"[Backtest] Fetched {len(all_klines)} klines ({symbol} {tf})")
         return all_klines
 
-    async def _simulate_pipeline(self, kline: dict, history: list = None) -> str:
-        """两阶段架构：经典指标过滤 → LLM 审查"""
-        recent = (history or [kline])[-210:]  # 用 210 根以支持 MA200 计算
-        closes = [float(k.get("close", k.get(4, 0))) for k in recent]
-        volumes = [float(k.get("volume", k.get(5, 0))) for k in recent]
+    def _get_mtf_signal_at(self, symbol: str, all_data: dict, current_idx: int) -> str:
+        """
+        在历史某个位置，用当时能看到的数据计算多时间框架信号。
+        all_data: {"1d": df, "4h": df, "1h": df, "15m": df, "1w": df}
+        current_idx: 当前是日线数据的第几根
+        返回: "LONG" / "SHORT" / "NO_TRADE"
+        """
+        MIN_BARS = 60  # 至少需要60根K线才能计算
 
-        # ── 第一阶段：经典指标生成信号 ──────────────────
-        # RSI(14) 序列
-        rsi_list = []
-        for i in range(14, len(closes)):
-            chunk = closes[i - 14:i + 1]
-            gains = [chunk[j] - chunk[j - 1] for j in range(1, len(chunk)) if chunk[j] > chunk[j - 1]]
-            losses = [abs(chunk[j] - chunk[j - 1]) for j in range(1, len(chunk)) if chunk[j] <= chunk[j - 1]]
-            avg_g = sum(gains) / 14 if len(gains) >= 14 else 0.001
-            avg_l = sum(losses) / 14 if len(losses) >= 14 else 0.001
-            rsi_list.append(100 - (100 / (1 + avg_g / avg_l)))
-        rsi = rsi_list[-1] if rsi_list else 50
-
-        # RSI 相对均值
-        import statistics
-        rsi_ma = statistics.mean(rsi_list[-20:]) if len(rsi_list) >= 20 else (rsi if rsi_list else 50)
-
-        # MA5 / MA10 / MA20 / MA60 / MA120
-        ma5   = sum(closes[-5:])    / 5   if len(closes) >= 5   else closes[-1]
-        ma10  = sum(closes[-10:])   / 10  if len(closes) >= 10  else closes[-1]
-        ma20  = sum(closes[-20:])   / 20  if len(closes) >= 20  else closes[-1]
-        ma60  = sum(closes[-60:])   / 60  if len(closes) >= 60  else closes[-1]
-        ma120 = sum(closes[-120:])  / 120 if len(closes) >= 120 else closes[-1]
-        price = closes[-1]
-
-        # 前一根的 MA5 / MA10（用于金叉死叉判断）
-        prev_ma5  = sum(closes[-6:-1])  / 5  if len(closes) >= 6  else ma5
-        prev_ma10 = sum(closes[-11:-1]) / 10 if len(closes) >= 11 else ma10
-
-        # 成交量比
-        vol_ratio = (sum(volumes[-3:]) / 3) / (sum(volumes[-10:]) / 10) if len(volumes) >= 10 else 1.0
-
-        # ── Regime 判断：三均线排列 ──
-        if price > ma20 > ma60 > ma120:
-            regime = "BULL"
-        elif price < ma20 < ma60 < ma120:
-            regime = "BEAR"
-        else:
+        # 截取到当前时间点之前的数据（不能用未来数据）
+        df_daily = all_data.get("1d", pd.DataFrame())
+        if df_daily.empty or current_idx < MIN_BARS:
             return "NO_TRADE"
 
-        # ── 规则：Regime 内双向逻辑 ──
-        golden_cross = prev_ma5 < prev_ma10 and ma5 > ma10
-        death_cross  = prev_ma5 > prev_ma10 and ma5 < ma10
+        # 用当前时间点的时间戳过滤各时间框架
+        current_time = df_daily["time"].iloc[current_idx]
 
-        if regime == "BULL":
-            # 牛市主做 LONG，金叉入场
-            if (golden_cross or rsi < rsi_ma * 0.95) and vol_ratio > 1.0:
-                candidate = "LONG"
-            else:
-                return "NO_TRADE"
+        def slice_df(df):
+            if df.empty:
+                return df
+            return df[df["time"] <= current_time].tail(100).reset_index(drop=True)
 
-        elif regime == "BEAR":
-            # 熊市不做空，等待牛市信号
+        df_daily_slice  = slice_df(all_data.get("1d", pd.DataFrame()))
+        df_weekly_slice = slice_df(all_data.get("1w", pd.DataFrame()))
+        df_4h_slice     = slice_df(all_data.get("4h", pd.DataFrame()))
+        df_1h_slice     = slice_df(all_data.get("1h", pd.DataFrame()))
+        df_15m_slice    = slice_df(all_data.get("15m", pd.DataFrame()))
+        df_3day_slice   = resample_to_3day(df_daily_slice)
+
+        try:
+            result = compute_signal(
+                df_weekly=df_weekly_slice,
+                df_3day=df_3day_slice,
+                df_daily=df_daily_slice,
+                df_4h=df_4h_slice,
+                df_1h=df_1h_slice,
+                df_15m=df_15m_slice,
+            )
+            return result.signal
+        except Exception:
             return "NO_TRADE"
-        else:
-            return "NO_TRADE"
 
-        # ── 第二阶段：LLM 审查候选信号 ──────────────────
-        from core.deepseek_client import DeepSeekClient
-        summary = "\n".join(
-            f"C={c:.0f} V={v:.0f}" for c, v in zip(closes[-10:], volumes[-10:])
-        )
-        prompt_data = {
-            "symbol":    self._symbol,
-            "candidate": candidate,
-            "rsi":       round(rsi, 1),
-            "ma5":       round(ma5, 1),
-            "ma20":      round(ma20, 1),
-            "vol_ratio": round(vol_ratio, 2),
-            "recent_10": summary,
-        }
-        ai = DeepSeekClient()
-        result = await asyncio.to_thread(ai.validate_signal, prompt_data)
-        return result.get("decision", "NO_TRADE")
+    def _simulate_pipeline(self, symbol: str, current_idx: int) -> str:
+        return self._get_mtf_signal_at(symbol, self.all_data, current_idx)
 
     def _calculate_metrics(self, final: float, initial: float,
                            trades: list, equity: list) -> dict:
