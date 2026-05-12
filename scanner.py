@@ -11,8 +11,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from layers.data.orchestrator import DataOrchestrator
-from core.deepseek_client import DeepSeekClient
 from core.signal_tracker import log_signal, save_stats
+from layers.intelligence.multi_tf_signal import compute_signal, klines_to_df, resample_to_3day
+from core.feishu_notify import send_dm
 
 
 SYMBOLS = ["BTCUSDT", "SOLUSDT"]
@@ -92,66 +93,74 @@ def fuse_signals(tf_results: list) -> dict:
     return {"fusion": "NO_TRADE", "confidence": 0, "details": f"不足{MIN_AGREE}: {details}"}
 
 
-async def scan_symbol(symbol: str, dc: DataOrchestrator, ai: DeepSeekClient) -> dict:
-    """对一个标的扫描所有周期，返回融合结果"""
-    tf_results = []
+async def scan_symbol(symbol: str, dc: DataOrchestrator) -> dict:
+    """多时间框架技术指标扫描"""
     current_price = 0
-
-    for tf in TIMEFRAMES:
-        try:
-            # 取 50 根 K 线（近期数据够 AI 分析即可）
-            klines = dc.binance.get_klines(symbol, tf, limit=50)
-            if not klines:
-                log(f"  {symbol} {tf}: 无数据")
-                tf_results.append({
-                    "timeframe": tf, "signal": "NO_TRADE",
-                    "confidence": 0, "reason": "NO_DATA",
-                })
-                continue
-
+    try:
+        # 取 15m K 线获取当前价格
+        klines = dc.binance.get_klines(symbol, "15m", limit=5)
+        if klines:
             last = klines[-1]
-            price = float(last.get("close", last.get(4, 0)))
-            if tf == TIMEFRAMES[0]:
-                current_price = price
+            current_price = float(last.get("close", last.get(4, 0)))
 
-            summary = build_klines_summary(klines)
-            result = await asyncio.to_thread(ai.scan_signal, f"{symbol}({tf})", summary, 5)
+        # 用多时间框架指标计算信号
+        mtf_result = await get_mtf_signal(dc, symbol)
+        signal = mtf_result.signal
+        conf = mtf_result.confidence
+        reason = mtf_result.reason
 
-            signal = result.get("signal", "NO_TRADE")
-            conf = result.get("confidence", 0)
-            reason = result.get("reason", "")
+        log(f"  {symbol}: ${current_price:.2f} → {signal} (conf={conf:.2f}) [{reason[:80]}]")
 
-            log(f"  {symbol} {tf}: ${price:.2f} → {signal} (conf={conf:.2f}) {reason[:50]}")
+        # 构建与原有融合格式兼容的结果
+        result = {
+            "symbol": symbol,
+            "price": current_price,
+            "fusion": signal,
+            "confidence": conf,
+            "fusion_details": reason,
+            "timeframe_results": [{"timeframe": "mtf", "signal": signal, "confidence": conf, "reason": reason}],
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
-            tf_results.append({
-                "timeframe": tf,
-                "signal": signal,
-                "confidence": conf,
-                "price": price,
-                "reason": reason,
-            })
+    except Exception as e:
+        log(f"  {symbol}: 错误 {e}")
+        result = {
+            "symbol": symbol,
+            "price": current_price,
+            "fusion": "NO_TRADE",
+            "confidence": 0,
+            "fusion_details": f"ERROR: {e}",
+            "timeframe_results": [],
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
-        except Exception as e:
-            log(f"  {symbol} {tf}: 错误 {e}")
-            tf_results.append({
-                "timeframe": tf, "signal": "NO_TRADE",
-                "confidence": 0, "reason": f"ERROR: {e}",
-            })
+    return result
 
-    # 融合
-    fusion = fuse_signals(tf_results)
 
-    result = {
-        "symbol": symbol,
-        "price": current_price,
-        "timeframe_results": tf_results,
-        "fusion": fusion["fusion"],
-        "confidence": fusion.get("confidence", 0),
-        "fusion_details": fusion.get("details", ""),
-        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+async def get_mtf_signal(dc, symbol):
+    """拉取多时间框架数据，计算信号"""
+    timeframes = {
+        "weekly": "1w",
+        "daily":  "1d",
+        "h4":     "4h",
+        "h1":     "1h",
+        "m15":    "15m",
     }
+    klines_map = {}
+    for name, tf in timeframes.items():
+        raw = dc.binance.get_klines(symbol, tf, limit=100)
+        klines_map[name] = klines_to_df(raw)
 
-    log(f"  {symbol} 融合 → {fusion['fusion']} (conf={fusion.get('confidence',0):.2f}) [{fusion.get('details','')}]")
+    df_3day = resample_to_3day(klines_map["daily"])
+
+    result = compute_signal(
+        df_weekly=klines_map["weekly"],
+        df_3day=df_3day,
+        df_daily=klines_map["daily"],
+        df_4h=klines_map["h4"],
+        df_1h=klines_map["h1"],
+        df_15m=klines_map["m15"],
+    )
     return result
 
 
@@ -163,13 +172,12 @@ async def run_scanner():
         binance_key=os.getenv("BINANCE_API_KEY", ""),
         binance_secret=os.getenv("BINANCE_API_SECRET", ""),
     )
-    ai = DeepSeekClient()
     signals_found = []
 
     # 逐个标的扫描（避免并行调用过多导致限流）
     for symbol in SYMBOLS:
         log(f"═══ 扫描 {symbol} ═══")
-        result = await scan_symbol(symbol, dc, ai)
+        result = await scan_symbol(symbol, dc)
 
         # 保存每个标的的多周期详情
         cache_file = CACHE_DIR / f"{symbol}.json"
@@ -187,6 +195,16 @@ async def run_scanner():
                 fusion_details=result.get("fusion_details", ""),
                 source="scanner",
             )
+            # 飞书私聊推送
+            price_str = f"${result['price']:,.2f}" if result['price'] > 0 else "?"
+            msg = (
+                f"🚨 交易信号: {result['symbol']}\n"
+                f"方向: {result['fusion']}\n"
+                f"价格: {price_str}\n"
+                f"信心: {result.get('confidence', 0):.0%}\n"
+                f"原因: {result.get('fusion_details', '')[:120]}"
+            )
+            send_dm(msg)
             log(f"  ✅ {symbol} 融合通过: {result['fusion']} ({result.get('fusion_details','')[:80]})")
         else:
             log(f"  {symbol} 融合未通过: {result.get('fusion_details','')[:120]}")
