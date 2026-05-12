@@ -241,12 +241,12 @@ class BacktestEngine:
         import statistics
         rsi_ma = statistics.mean(rsi_list[-20:]) if len(rsi_list) >= 20 else (rsi if rsi_list else 50)
 
-        # MA5 / MA10 / MA20 / MA50 / MA200
-        ma5   = sum(closes[-5:])   / 5   if len(closes) >= 5   else closes[-1]
-        ma10  = sum(closes[-10:])  / 10  if len(closes) >= 10  else closes[-1]
-        ma20  = sum(closes[-20:])  / 20  if len(closes) >= 20  else closes[-1]
-        ma50  = sum(closes[-50:])  / 50  if len(closes) >= 50  else None
-        ma200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else None
+        # MA5 / MA10 / MA20 / MA60 / MA120
+        ma5   = sum(closes[-5:])    / 5   if len(closes) >= 5   else closes[-1]
+        ma10  = sum(closes[-10:])   / 10  if len(closes) >= 10  else closes[-1]
+        ma20  = sum(closes[-20:])   / 20  if len(closes) >= 20  else closes[-1]
+        ma60  = sum(closes[-60:])   / 60  if len(closes) >= 60  else closes[-1]
+        ma120 = sum(closes[-120:])  / 120 if len(closes) >= 120 else closes[-1]
         price = closes[-1]
 
         # 前一根的 MA5 / MA10（用于金叉死叉判断）
@@ -256,23 +256,40 @@ class BacktestEngine:
         # 成交量比
         vol_ratio = (sum(volumes[-3:]) / 3) / (sum(volumes[-10:]) / 10) if len(volumes) >= 10 else 1.0
 
-        # ── Regime 检测层：MA50 < MA200 且价格在 MA200 下方 → 熊市，不做多 ──
-        if ma50 is not None and ma200 is not None:
-            if ma50 < ma200 and price < ma200:
-                # MA50 在 MA200 下方且价格低于 MA200 = 确认熊市，不做多
-                return "NO_TRADE"
+        # ── Regime 判断：三均线排列 ──
+        if price > ma20 > ma60 > ma120:
+            regime = "BULL"
+        elif price < ma20 < ma60 < ma120:
+            regime = "BEAR"
+        else:
+            return "NO_TRADE"
 
-        # ── 规则：金叉/超卖 → MA20 + 成交量过滤 ──
-        rsi_low  = rsi < rsi_ma * 0.95
-        rsi_high = rsi > rsi_ma * 1.05
-
+        # ── 规则：Regime 内双向逻辑 ──
         golden_cross = prev_ma5 < prev_ma10 and ma5 > ma10
         death_cross  = prev_ma5 > prev_ma10 and ma5 < ma10
 
-        if (golden_cross or rsi_low) and price > ma20 and vol_ratio > 1.0:
-            candidate = "LONG"
-        elif (death_cross or rsi_high) and price < ma20 and vol_ratio > 1.0:
-            return "NO_TRADE"  # BTC 牛市结构下暂停空单
+        if regime == "BULL":
+            # 牛市主做 LONG，金叉入场
+            if (golden_cross or rsi < rsi_ma * 0.95) and vol_ratio > 1.0:
+                candidate = "LONG"
+            else:
+                return "NO_TRADE"
+
+        elif regime == "BEAR":
+            # 熊市主做 SHORT
+            if (death_cross or rsi > rsi_ma * 1.05) and vol_ratio > 1.0:
+                candidate = "SHORT"
+
+            # 同时监测熊末反转：价格连续3根收涨 + 成交量放大 + RSI开始回升
+            elif (
+                closes[-1] > closes[-2] > closes[-3]        # 连续3根阳线
+                and vol_ratio > 1.2                          # 成交量放大
+                and rsi > rsi_ma * 0.98                      # RSI 不再创新低
+                and closes[-1] > ma20                        # 价格收复 MA20
+            ):
+                candidate = "LONG"  # 熊末抄底信号
+            else:
+                return "NO_TRADE"
         else:
             return "NO_TRADE"
 
