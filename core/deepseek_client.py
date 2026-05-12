@@ -136,16 +136,46 @@ class DeepSeekClient:
         ], temperature=0.2)
         return self._parse_json(result, {"decision": "NO_TRADE", "confidence": 0, "rationale": "API_FAILED", "position_size": "空仓"})
 
-    def scan_signal(self, symbol: str, klines_summary: str) -> dict:
-        """扫描信号（供 scanner 使用）"""
-        result = self.chat([
-            {"role": "system", "content": "你是一个专业加密货币交易员。分析数据，输出交易信号。只返回JSON。"},
-            {"role": "user", "content": f"""分析 {symbol} 的以下数据，判断是否有交易机会。
-返回 JSON:
-{{"signal": "LONG/SHORT/NO_TRADE", "confidence": 0.0~1.0, "reason": "主要原因", "key_level": "关键价位"}}
+    def scan_signal(self, symbol: str, klines_summary: str, n_klines: int = 20) -> dict:
+        """扫描信号（供 scanner / 回测使用）"""
+        system_prompt = """你是一个严格的量化交易信号过滤器。
 
-数据：{klines_summary}
-"""},
+核心原则：
+- 宁可不交易，不可乱交易
+- 没有强烈确信就输出 NO_TRADE
+- 只在满足全部条件时才输出 LONG 或 SHORT
+
+输出 LONG 的条件（必须全部满足）：
+1. 近期收盘价连续高于前5根均值
+2. 成交量有放大迹象（近3根 > 前10根均量）
+3. 无明显顶部形态（非连续大阳线后高位横盘）
+4. confidence >= 0.65
+
+输出 SHORT 的条件（必须全部满足）：
+1. 近期收盘价连续低于前5根均值
+2. 成交量有放大迹象
+3. 无明显底部形态
+4. confidence >= 0.65
+
+其余所有情况输出 NO_TRADE。
+
+只返回 JSON，不要任何解释文字。"""
+
+        result = self.chat([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"""分析 {symbol} 最近 {n_klines} 根日线K线，判断当前是否有交易机会。
+
+K线数据（从旧到新）：
+{klines_summary}
+
+必须返回以下格式：
+{{"signal": "LONG/SHORT/NO_TRADE",
+  "confidence": 0.0~1.0,
+  "reason": "一句话说明核心理由",
+  "regime": "BULL/BEAR/RANGING",
+  "key_level": "关键价位"}}
+
+再次强调：不确定就返回 NO_TRADE。"""},
         ], temperature=0.2, max_tokens=500)
         return self._parse_json(result, {"signal": "NO_TRADE", "confidence": 0, "reason": "API_FAILED"})
 

@@ -115,7 +115,7 @@ async def scan_symbol(symbol: str, dc: DataOrchestrator, ai: DeepSeekClient) -> 
                 current_price = price
 
             summary = build_klines_summary(klines)
-            result = await asyncio.to_thread(ai.scan_signal, f"{symbol}({tf})", summary)
+            result = await asyncio.to_thread(ai.scan_signal, f"{symbol}({tf})", summary, 5)
 
             signal = result.get("signal", "NO_TRADE")
             conf = result.get("confidence", 0)
