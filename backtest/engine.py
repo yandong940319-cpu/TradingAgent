@@ -176,32 +176,48 @@ class BacktestEngine:
 
     async def _fetch_historical(self, symbol: str, tf: str,
                                  start: str, end: str) -> list:
-        """获取历史 K 线数据"""
-        if self.data_agent:
-            # 使用数据 Agent 获取
-            try:
-                if hasattr(self.data_agent, 'get_klines'):
-                    # Binance 模式
-                    result = self.data_agent.get_klines(symbol, tf, limit=1000)
-                    if result:
-                        return result
-            except:
-                pass
-
-        # 降级: 直接从 Binance API 获取
+        """获取 5 年历史 K 线数据（分页拉取）"""
+        import time as _time
         import requests
         base = "https://api.binance.com"
-        params = {"symbol": symbol.upper(), "interval": tf, "limit": 1000}
-        try:
-            resp = requests.get(f"{base}/api/v3/klines", params=params, timeout=15)
-            if resp.status_code == 200:
-                return [{0: k[0], 1: k[1], 2: k[2], 3: k[3], 4: k[4], 5: k[5],
-                         "time": k[0], "open": float(k[1]), "high": float(k[2]),
-                         "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])}
-                        for k in resp.json()]
-        except Exception as e:
-            print(f"[Backtest] Fetch error: {e}")
-        return []
+
+        # 计算 5 年前的毫秒时间戳
+        end_ms = int(_time.time() * 1000)
+        start_ms = end_ms - int(5 * 365.25 * 24 * 3600 * 1000)
+
+        all_klines = []
+        while start_ms < end_ms:
+            params = {
+                "symbol": symbol.upper(),
+                "interval": tf,
+                "limit": 1000,
+                "startTime": start_ms,
+            }
+            try:
+                resp = requests.get(f"{base}/api/v3/klines", params=params, timeout=15)
+                if resp.status_code != 200:
+                    print(f"[Backtest] API error {resp.status_code}: {resp.text[:100]}")
+                    break
+                klines = resp.json()
+                if not klines:
+                    break
+                parsed = [
+                    {0: k[0], 1: k[1], 2: k[2], 3: k[3], 4: k[4], 5: k[5],
+                     "time": k[0], "open": float(k[1]), "high": float(k[2]),
+                     "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])}
+                    for k in klines
+                ]
+                all_klines.extend(parsed)
+                # 下一页从最后一根 K 线的下一毫秒开始
+                start_ms = klines[-1][0] + 1
+                if len(klines) < 1000:
+                    break  # 没有更多数据了
+            except Exception as e:
+                print(f"[Backtest] Fetch error: {e}")
+                break
+
+        print(f"[Backtest] Fetched {len(all_klines)} klines ({symbol} {tf})")
+        return all_klines
 
     async def _simulate_pipeline(self, kline: dict, history: list = None) -> str:
         """两阶段架构：经典指标过滤 → LLM 审查"""
