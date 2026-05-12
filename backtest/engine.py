@@ -38,43 +38,48 @@ class BacktestEngine:
         trade_log = []
         equity = [{"time": klines[0]["date" if "date" in klines[0] else "time"], "equity": capital}]
         self._symbol = symbol
-        entry_price = 0.0    # 开仓价
-        entry_index = -1     # 开仓时的 K 线索引
-        STOP_LOSS     = 0.02 # 2% 硬止损，任何情况都触发
-        TAKE_PROFIT   = 0.04 # 4% 止盈
-        MIN_HOLD_DAYS = 3    # 最少持仓天数，但止损例外
+        entry_price = 0.0     # 开仓价
+        entry_index = -1      # 开仓时的 K 线索引
+        peak_pnl    = 0.0     # 持仓期间最高盈利
+        STOP_LOSS       = 0.02  # 2% 硬止损，任何情况都触发
+        TRAILING_START  = 0.01  # 盈利超过 1% 启动追踪止损
+        TRAILING_STEP   = 0.005 # 追踪止损回撤 0.5% 触发
+        MIN_HOLD_BARS   = 8     # 最少持仓 K 线数（15m × 8 = 2小时）
+        TAKE_PROFIT     = 0.04  # 固定止盈 4%
 
         for i in range(len(klines)):
             k = klines[i]
             price = float(k.get("close", k.get(4, 0)))
 
-            # ── 三级退出检查（先于新信号） ──
+            # ── 退出检查（追踪止损，无 AI_EXIT） ──
             if position != 0 and entry_price > 0:
-                hold_days = i - entry_index
+                hold_bars = i - entry_index
                 pnl = (price - entry_price) / entry_price
                 if position < 0:
                     pnl = -pnl
 
+                # 更新最高盈利点
+                peak_pnl = max(peak_pnl, pnl)
+
                 should_exit = False
                 exit_reason = ""
 
-                # 第一级：硬止损——无条件触发，不受持仓天数限制
+                # 第一级：硬止损——任何时候都触发
                 if pnl <= -STOP_LOSS:
                     should_exit = True
                     exit_reason = "HARD_STOP"
 
-                # 第二级：止盈——无条件触发
-                elif pnl >= TAKE_PROFIT:
+                # 第二级：追踪止损——盈利超过 1% 后，回撤 0.5% 触发
+                elif peak_pnl >= TRAILING_START and (peak_pnl - pnl) >= TRAILING_STEP:
+                    should_exit = True
+                    exit_reason = "TRAILING_STOP"
+
+                # 第三级：最少持仓满足后，固定止盈
+                elif hold_bars >= MIN_HOLD_BARS and pnl >= TAKE_PROFIT:
                     should_exit = True
                     exit_reason = "TAKE_PROFIT"
 
-                # 第三级：持仓满最少天数后，AI 才能介入平仓
-                elif hold_days >= MIN_HOLD_DAYS:
-                    signal = await self._simulate_pipeline(k, history=klines[:i + 1])
-                    expected_dir = "LONG" if position > 0 else "SHORT"
-                    if signal == "NO_TRADE" or signal != expected_dir:
-                        should_exit = True
-                        exit_reason = "AI_EXIT"
+                # 完全移除 AI_EXIT
 
                 if should_exit:
                     action = "CLOSE_LONG" if position > 0 else "CLOSE_SHORT"
@@ -84,15 +89,16 @@ class BacktestEngine:
                         "price": price,
                         "position": 0,
                         "signal": exit_reason,
-                        "hold_days": hold_days,
+                        "hold_days": hold_bars,
                         "exit_reason": exit_reason,
                     })
                     position = 0
-                    # 跳过本根 K 线的开仓逻辑（但不跳过权益计算）
+                    # 重置 peak_pnl
                     # 让 equity.append 在下面执行
 
             # ── 开仓逻辑（仅在无持仓时） ──
             if position == 0:
+                peak_pnl = 0.0  # 重置追踪止损基线
                 signal = await self._simulate_pipeline(k, history=klines[:i + 1])
 
                 if signal == "LONG":
