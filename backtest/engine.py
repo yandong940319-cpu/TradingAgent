@@ -221,7 +221,7 @@ class BacktestEngine:
 
     async def _simulate_pipeline(self, kline: dict, history: list = None) -> str:
         """两阶段架构：经典指标过滤 → LLM 审查"""
-        recent = (history or [kline])[-35:]  # 用 35 根以提供足够 RSI_MA 窗口
+        recent = (history or [kline])[-210:]  # 用 210 根以支持 MA200 计算
         closes = [float(k.get("close", k.get(4, 0))) for k in recent]
         volumes = [float(k.get("volume", k.get(5, 0))) for k in recent]
 
@@ -241,20 +241,28 @@ class BacktestEngine:
         import statistics
         rsi_ma = statistics.mean(rsi_list[-20:]) if len(rsi_list) >= 20 else (rsi if rsi_list else 50)
 
-        # MA5 / MA10 / MA20
-        ma5  = sum(closes[-5:]) / 5 if len(closes) >= 5 else closes[-1]
-        ma10 = sum(closes[-10:]) / 10 if len(closes) >= 10 else closes[-1]
-        ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else closes[-1]
+        # MA5 / MA10 / MA20 / MA50 / MA200
+        ma5   = sum(closes[-5:])   / 5   if len(closes) >= 5   else closes[-1]
+        ma10  = sum(closes[-10:])  / 10  if len(closes) >= 10  else closes[-1]
+        ma20  = sum(closes[-20:])  / 20  if len(closes) >= 20  else closes[-1]
+        ma50  = sum(closes[-50:])  / 50  if len(closes) >= 50  else None
+        ma200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else None
         price = closes[-1]
 
         # 前一根的 MA5 / MA10（用于金叉死叉判断）
-        prev_ma5  = sum(closes[-6:-1]) / 5 if len(closes) >= 6 else ma5
+        prev_ma5  = sum(closes[-6:-1])  / 5  if len(closes) >= 6  else ma5
         prev_ma10 = sum(closes[-11:-1]) / 10 if len(closes) >= 11 else ma10
 
         # 成交量比
         vol_ratio = (sum(volumes[-3:]) / 3) / (sum(volumes[-10:]) / 10) if len(volumes) >= 10 else 1.0
 
-        # 规则：金叉/超卖 OR 死叉/超买 → MA20 + 成交量过滤
+        # ── Regime 检测层：MA50 < MA200 → 熊市，不做多 ──
+        if ma50 is not None and ma200 is not None:
+            if ma50 < ma200:
+                # 死叉状态：MA50 在 MA200 下方 = 熊市，不做多
+                return "NO_TRADE"
+
+        # ── 规则：金叉/超卖 → MA20 + 成交量过滤 ──
         rsi_low  = rsi < rsi_ma * 0.95
         rsi_high = rsi > rsi_ma * 1.05
 
